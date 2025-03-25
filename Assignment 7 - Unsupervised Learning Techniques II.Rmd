@@ -1,0 +1,516 @@
+---
+title: "Assignment 7 - Unsupervised Learning II"
+author: "Marko Konte"
+date: "7/16/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(ggplot2)
+library(data.table)
+library(zipcode)
+library(tidyverse)
+library(stringr)
+library(ggthemes)
+library(DT)
+library(usmap)
+library(fpc)
+library(factoextra)
+suppressPackageStartupMessages(library(maps))
+
+
+payment <- read.csv("inpatientCharges.csv", stringsAsFactors = T)
+
+# Convert the average to numeric
+p1 <- strsplit(x = as.character(payment$Average.Covered.Charges),split = "$",fixed = T)
+payment$Average.Covered.Charges <- as.numeric(sapply(p1,"[[",2))
+p1 <- strsplit(x = as.character(payment$Average.Total.Payments),split = "$",fixed = T)
+payment$Average.Total.Payments <- as.numeric(sapply(p1,"[[",2))
+p1 <- strsplit(x = as.character(payment$Average.Medicare.Payments),split = "$",fixed = T)
+payment$Average.Medicare.Payments <- as.numeric(sapply(p1,"[[",2))
+rm("p1")
+
+#Function to Scale the data
+scale_this <- function(x){
+  (x - mean(x, na.rm=TRUE)) / sd(x, na.rm=TRUE)
+}  
+
+```
+
+
+# EDA
+1. Summing all cost based variables. After capping and flooring the key data points we will sum each individual cost based variable. In order to get it prepared to run on a clustering model, we will then scale these figures. 
+
+```{r Summing and scaling figures}
+#Grouping values by procedure, state that shows the total of key cost based variables and identifying standard deviation of total payments
+
+TotPayST <- payment %>% mutate(DRGState = paste(Provider.State, 
+                                               DRG.Definition, sep="_")) %>% 
+                                 dplyr::group_by(DRGState, Provider.Name) %>%
+                  dplyr::summarise(Count = n(),
+                   TotPay = sum(Average.Total.Payments), #Sums together of all total payments per procedure and state
+                   TotCov = sum(Average.Covered.Charges), #Sums together all covered charges per procedure and state
+                   TotMed = sum(Average.Medicare.Payments), #Sums together all medicare payments per procedure and state 
+                   TotDis = sum(Total.Discharges)) #Sums together all discharges per procedures and state 
+
+
+dim(TotPayST)
+summary(TotPayST)
+
+```
+
+2. Taking the differences from key variables. We will rely on total payments as a baseline and calculate the difference from medicare payments and covered charges. In addition, we will calculate the difference between covered charges and mediare per procedure and state. 
+
+```{r Difference based variables}
+#Taking differences between numeric values to identify outliers in amount of cost per procedure + state
+
+DiffVar <- payment %>% mutate(DRGState = paste(Provider.State, 
+                                                   DRG.Definition, sep="_")) %>% 
+                                    dplyr::group_by(DRGState, Provider.Name) %>%
+                                    dplyr::summarise(Count = n(),
+                   PayMedDiff = (sum(Average.Total.Payments)-sum(Average.Medicare.Payments)), #Total Payments minus Medicare payments. Negative value indicates more spent in Medicare than overall procedure. 
+                   CovMedDiff = (sum(Average.Covered.Charges)-sum(Average.Medicare.Payments)), #Covered charges minus medicare payments (negative value implies medicare spent more than was covered)
+                   TotCovDiff = (sum(Average.Total.Payments)-sum(Average.Covered.Charges))) #Total Payments minus Covered Charges. Negative value indicates more spent on discharge covered charges than total payments 
+
+
+dim(DiffVar)
+summary(DiffVar)
+
+```
+
+3. Making key ratios from the cost based variables and total discharge. We will look at the ratio between covered charges and medicare to total payments. In addition, we identify the total payments per discharge, medicare payments per discharge, and covered payments per discharge.
+
+```{r ratio}
+#Making ratios between all of the key numeric cost values
+PercTot <- payment %>% mutate(DRGState = paste(Provider.State, 
+                                               DRG.Definition, sep="_")) %>%
+            group_by(Provider.Name, DRGState) %>%
+            dplyr::summarise(Count = n(),
+                   TotalPayments = sum(Average.Total.Payments),
+                   MedicarePayments = sum(Average.Medicare.Payments),
+                   CoveredCharges = sum(Average.Covered.Charges),
+                   Discharges = sum(Total.Discharges),
+                   MedPerc = round(MedicarePayments/TotalPayments,2), #% of medicare payments to the total payments per procedure in a state. 
+                   CovPerc = round(CoveredCharges/TotalPayments,2), #% of covered changes to the total payments of procedures in a state
+                   DisPerc = round(Discharges/TotalPayments,2), #% of total discharges to the total payments of a procedure. 
+                   MedPerDis = round(MedicarePayments/Discharges,2), #Average medicare payment per discharge for the procedure in a state
+                   TotPerDis = round(TotalPayments/Discharges,2), #Average total payment per discharge for the procedure in a state
+                   CovPerDis = round(CoveredCharges/Discharges,2)) %>% #Average total payment per discharge for the procedure in a state
+            ungroup()
+
+
+dim(PercTot)
+summary(PercTot)
+
+```
+
+## Capping and Flooring and creating final datasets 
+
+We wll now apply capping and flooring to the results of the features created. Next, we will scale these values which is the final preparation before we are ready to create the features that will be used in the modeling to be done.
+
+
+```{r cap and floor}
+
+#Function for capping and flooring of data
+#Capping and flooring 
+fun <- function(x){
+  quantiles <- quantile( x, c(.05, .95 ) )
+  x[ x < quantiles[1] ] <- quantiles[1]
+  x[ x > quantiles[2] ] <- quantiles[2]
+  x
+}
+
+#Capping and flooring total cost variable features
+TotPayST <- TotPayST %>% mutate(TotPay = fun(TotPay),
+                            TotCov = fun(TotCov),
+                            TotMed = fun(TotMed),
+                            TotDis = fun(TotDis))
+
+#Scaling the figures from total scaled object above
+Scaled <- TotPayST %>% mutate(ScTotPay = scale_this(TotPay),
+                              ScTotCov = scale_this(TotCov),
+                              ScTotMed = scale_this(TotMed),
+                              ScTotDis = scale_this(TotDis)) %>% 
+  group_by(DRGState, Provider.Name)
+Scaled$ScTotPay[is.na(Scaled$ScTotPay)] <- 0
+Scaled$ScTotCov[is.na(Scaled$ScTotCov)] <- 0
+Scaled$ScTotMed[is.na(Scaled$ScTotMed)] <- 0
+Scaled$ScTotDis[is.na(Scaled$ScTotDis)] <- 0
+
+#Capping and flooring difference variables
+DiffVar <- DiffVar %>% mutate(PayMedDiff = fun(PayMedDiff),
+                              CovMedDiff = fun(CovMedDiff),
+                              TotCovDiff = fun(TotCovDiff))
+
+#Scaling the values from above
+DiffVarSc <- DiffVar %>% mutate(PayMedDiffSc = scale_this(PayMedDiff),
+                                        CovMedDiffSc = scale_this(CovMedDiff),
+                                        TotCovDiffSc = scale_this(TotCovDiff)) %>% ungroup()
+DiffVarSc$PayMedDiffSc[is.na(DiffVarSc$PayMedDiffSc)] <- 0
+DiffVarSc$CovMedDiffSc[is.na(DiffVarSc$CovMedDiffSc)] <- 0
+DiffVarSc$TotCovDiffSc[is.na(DiffVarSc$TotCovDiffSc)] <- 0
+
+#Capping and florring ratio variables
+PercTot <- PercTot %>% mutate(MedPerc = fun(MedPerc),
+                              CovPerc = fun(CovPerc),
+                              DisPerc = fun(DisPerc),
+                              MedPerDis = fun(MedPerDis),
+                              TotPerDis = fun(TotPerDis),
+                              CovPerDis = fun(CovPerDis))
+
+#Scaling the ratio values created in the PercTot object
+PercTotSc <- PercTot %>% mutate(ScMedPerc = scale_this(MedPerc),
+                                ScCovPerc = scale_this(CovPerc),
+                                ScDisPerc = scale_this(DisPerc),
+                                ScMedPerDis = scale_this(MedPerDis),
+                                ScTotPerDis = scale_this(TotPerDis),
+                                ScCovPerDis = scale_this(CovPerDis))
+
+
+```
+
+## Making the final dataset
+
+```{r making final dataset and train data}
+
+#Model set with without any splitting
+
+FinalDB <- payment %>% mutate(DRGState = paste(Provider.State, 
+                                               DRG.Definition, sep="_"))
+
+FinalDB <- select(FinalDB, Provider.Id, Provider.Name, Provider.Zip.Code, Average.Covered.Charges,
+                  Average.Total.Payments, Average.Medicare.Payments,Total.Discharges, DRGState) 
+
+#Scaled version of key numeric cost variables 
+FinalDB <- FinalDB %>% left_join(Scaled, by=c("DRGState", "Provider.Name"))
+
+#Adding values from DIfferences Table
+FinalDB <- FinalDB %>% left_join(DiffVarSc, by=c("DRGState","Provider.Name"))
+
+#Adding scaled values from the percentages variables
+FinalDB <- FinalDB %>% left_join(PercTotSc, by=c("DRGState","Provider.Name"))
+
+#Train set setup
+library(caTools)
+split = sample.split(payment, SplitRatio = 0.4)
+train = subset(payment, split == TRUE)
+test = subset(payment, split == FALSE)
+
+train <- train %>% mutate(DRGState = paste(Provider.State, 
+                                           DRG.Definition, sep="_"))
+
+train <- select(train, Provider.Id, Provider.Name, Provider.Zip.Code,Average.Covered.Charges,
+                Average.Total.Payments, Average.Medicare.Payments, Total.Discharges, DRGState) 
+
+#Scaled version of key numeric cost variables 
+train <- train %>% left_join(Scaled, by=c("DRGState", "Provider.Name"))
+
+#Adding values from DIfferences Table
+train <- train %>% left_join(DiffVarSc, by=c("DRGState","Provider.Name"))
+
+#Adding scaled values from the percentages variables
+train <- train %>% left_join(PercTotSc, by=c("DRGState","Provider.Name"))
+
+
+```
+
+# Singular Value Decomposition
+
+SVD is an approach not unlike the PCA process with few important differences. The process creates three key variables:
+
+D- Vector created by model which is akin to the standard deviation that is created by PCA models. However the SVD way of creating the D object forms by taking the sum of squares of the principal components but not dividing them by sample. This creates a 'biased' result and more representative to where the data is most significant.  
+
+U- Matrix created by model which contains left singular values which are representative of the rows in the initial dataset. These are orthogonal measurements which represent the positioning of the underlying datapoint within the original matrix. 
+
+V- 2nd matrix created which contains right singular values which are representative of the columns in the initial dataset. Like the U object, this is an orthogonal measurment which when combined together creates the standard deviation that is shown in the D object. 
+
+
+```{r SVD}
+svdb <- select(FinalDB, ScTotPay, ScTotCov, ScTotMed, ScTotDis,
+               PayMedDiffSc, CovMedDiffSc, TotCovDiffSc, 
+               ScMedPerc, ScCovPerc, ScMedPerDis,
+               ScTotPerDis, ScCovPerDis, ScDisPerc)
+summary(svdb)
+svd_model <- svd(svdb)
+summary(svd_model$d)
+svd_model
+
+#Standard deviation of SVD model shown
+variance.explained = prop.table(svd_model$d^2)
+plot(variance.explained, main = 'Variance Explained to Group')
+
+variance.explained
+
+#Plot of left singular values representing the rows 
+plot(svd_model$u[, 1], svd_model$u[, 2], col = svd_model$d, main = "SVD", xlab = "U1", ylab = "U2")
+
+#Right singular values representing columns
+plot(svd_model$v[, 1], svd_model$v[, 2], col = svd_model$d, main = "SVD", xlab = "V1", ylab = "V2")
+
+#Multiplying V variable by SD matrix to find significance
+sdv <- svd_model$v %*% sqrt(diag(svd_model$d))
+x1 <- sdv[,1]
+y1 <- sdv[,2]
+
+plot(x1, y1, col = svd_model$d, frame.plot = TRUE) +
+  text(x1, y1, labels = colnames(svdb), title(main = 'SVD Model Variable significance of first two Groups'))
+
+#Multiplying U Variable by SD matrix to find significance
+sdu <- svd_model$u %*% sqrt(diag(svd_model$d))
+x1u <- sdu[,1]
+y1u <- sdu[,2]
+
+#Since there are so many instances, will isolate the first 10 instances of the U variables
+x1s <- x1u[1:10]
+y1s <- y1u[1:10]
+
+plot(x1s, y1s, col = svd_model$d, frame.plot = TRUE)+
+  text(x1s, y1s, labels = colnames(svdb), title(main = 'SVD Model U Variable significance of first two Groups'))
+
+```
+
+## Summary:
+
+The first two clusters of the SVD model run explained 54.5% of the variance while the three clusters explained 73.5% of the variance in the dataset. The best way that I found to visualize the indvididual variables and outliers within them is to plot them by the first two clusters and show the significance behind them. It shows that the Discharge per Payment, difference based, variables, and covered charges had the most significance in determining the first two groupings of the model. 
+
+What could not be accomplished is to sort the U based (denotated from rows from intitial dataset) from largest to smallest. The visualization subset the first ten instances of the U variables, but it would be good to sort them and show the most significant ones and what variables they are tied to. 
+
+## Insight:
+
+Similar to PCA, we can identiy the significance of SVD models by reconstructing the variance in importance for the first couple of groupings. In visualizing the main variables identified in the model, the discharge per payment values had a large significance alongisde the difference between covered charges and medicare payments. Using the first two groupings as the most significant correlations of these variables, the consumers of the model can look at later groupings in the model and compare outliers in relation to the first two SVD groups. This may highlight instances where outliers and potential fraudulent instances could be. 
+
+# Autoencoder (Deep Learning)
+
+Employing an autoencoder or deep learning function to a dataset allows for the data being analyzed by first compressing the key datapoints, before reconstructing them back to create a prection model based on the valuations created. The first step of the model is the encoder, which compresses the data int a latent space representation, then the decoder, which reconstructs the data from this same representation for the purpose of predicting outputs.   
+
+
+```{r autoencoder,}
+#Loading H2o
+#detach("h2o", unload=TRUE)
+library(h2o)
+init <- h2o.init()
+init
+dldb <- select(train, ScTotPay, ScTotCov, ScTotMed, ScTotDis,
+               PayMedDiffSc, CovMedDiffSc, TotCovDiffSc, 
+               ScMedPerc, ScCovPerc, ScMedPerDis,
+               ScTotPerDis, ScCovPerDis, ScDisPerc)
+
+#Creating h2o object
+dldb_h <- as.h2o(dldb)
+head(dldb_h)
+
+#Splitting for deep learning test and train sets
+dldb_train_test <- h2o.splitFrame(dldb_h, 
+                                  ratios = c(0.4, 0.4), # must add up to less than 1.0
+                                  seed = 40)
+
+train  <- dldb_train_test[[1]]
+test1  <- dldb_train_test[[2]]
+test2  <- dldb_train_test[[3]]
+```
+
+### Model with 5,2,5 hidden layers
+```{R Model 1}
+##Model with 5,2,5 layers 
+x_col <- setdiff(colnames(dldb), c())
+dlmodel <- h2o.deeplearning(x = x_col,
+                          training_frame = train,
+                          model_id = "model",
+                          autoencoder = TRUE,
+                          hidden = c(5, 2, 5), 
+                          epochs = 40,
+                          activation = "Tanh",
+                          seed = 1041)
+dlmodel@model$variable_importances 
+dlmodel
+datatable(
+    dlmodel@model$variable_importances,
+    rownames = FALSE, 
+    colnames=c("Variable","relative_importance","scaled_importance","percentage"),
+    options = list(columnDefs=list(list(className = 'dt-center', targets = 0:5)))
+    )
+
+```
+
+MSE: 0.01725856
+
+RMSE: 0.1313718
+
+
+```{r Deepfeature model 1}
+#Deepfeatures with dlmodel
+train_features <- h2o.deepfeatures(dlmodel, train, layer = 2) %>% 
+  as.data.frame()
+
+ggplot(train_features, aes(DF.L2.C1, DF.L2.C2)) + 
+  geom_point(alpha = 0.1) +
+  ggtitle('Deepfeatures 2nd layer Extracted for 5,2,5 Model')
+
+```
+
+### Model with 10,5,10 layers
+```{R Autoencoder model 2}
+dlmodel2 <- h2o.deeplearning(x = x_col,
+                            training_frame = train,
+                            model_id = "model",
+                            autoencoder = TRUE,
+                            hidden = c(10, 5, 10), 
+                            epochs = 42,
+                            activation = "Tanh",
+                            seed = 1041)
+datatable(
+    dlmodel2@model$variable_importances,
+    rownames = FALSE, 
+    colnames=c("Variable","relative_importance","scaled_importance","percentage"),
+    options = list(columnDefs=list(list(className = 'dt-center', targets = 0:5)))
+    )
+
+```
+
+
+MSE: 0.003276709
+
+RMSE: 0.05724255
+
+```{r Deepfeature model 2}
+#Deepfeatures with dlmodel2
+train_features2 <- h2o.deepfeatures(dlmodel2, train, layer = 5) %>% 
+  as.data.frame()
+
+ggplot(train_features2, aes(DF.L2.C1, train_features2$DF.L2.C2, color = DF.L2.C3)) + 
+  geom_point(alpha = 0.1) +
+  ggtitle('Deepfeatures 2nd layer Extracted for 5,2,5 Model')
+
+
+```
+
+### Model with 4, 1, 4 layers 
+
+```{R Autoencoder Model 3}
+x_col <- setdiff(colnames(dldb), c())
+dlmodel3 <- h2o.deeplearning(x = x_col,
+                             training_frame = train,
+                             model_id = "model",
+                             autoencoder = TRUE,
+                             hidden = c(4, 1, 4), 
+                             epochs = 42,
+                             activation = "Tanh",
+                             seed = 1041)
+
+ datatable(
+    dlmodel3@model$variable_importances,
+    rownames = FALSE, 
+    colnames=c("Variable","relative_importance","scaled_importance","percentage"),
+    options = list(columnDefs=list(list(className = 'dt-center', targets = 0:5)))
+    )
+
+```
+
+MSE: 0.03042083
+
+RMSE: 0.1744157
+
+```{r Deepfeatures Model 3}
+#Deepfeatures with dlmodel 3
+train_features3 <- h2o.deepfeatures(dlmodel3, train, layer = 1) %>% 
+  as.data.frame()
+
+
+ggplot(train_features3, aes(DF.L1.C1, DF.L1.C2, color = DF.L1.C3)) + 
+  geom_point(alpha = 0.1) +
+  ggtitle('Deepfeatures 2nd layer Extracted for 4,1,4 Model')
+
+```
+
+### Model with 10, 1, 10 layers
+
+```{R Autoencoder model 4}
+x_col <- setdiff(colnames(dldb), c())
+dlmodel4 <- h2o.deeplearning(x = x_col,
+                             training_frame = train,
+                             model_id = "model",
+                             autoencoder = TRUE,
+                             hidden = c(10, 1, 10), 
+                             epochs = 40,
+                             activation = "Tanh",
+                             seed = 1041)
+ datatable(
+    dlmodel4@model$variable_importances,
+    rownames = FALSE, 
+    colnames=c("Variable","relative_importance","scaled_importance","percentage"),
+    options = list(columnDefs=list(list(className = 'dt-center', targets = 0:5)))
+    )
+
+```
+
+MSE: 0.03050227
+
+RMSE: 0.174649
+
+```{R deepfeatures model 4}
+#Deepfeatures with dlmodel4
+train_features4 <- h2o.deepfeatures(dlmodel4, train, layer = 1) %>% 
+  as.data.frame()
+
+ggplot(train_features4, aes(DF.L1.C1, DF.L1.C2, color = DF.L1.C3)) + 
+  geom_point(alpha = 0.1) +
+  ggtitle('Deepfeatures 2nd layer Extracted for 10,1,10 Model')
+
+```
+
+### Model with 5 hidden units with 10, 5, 1, 5, 10 layers
+
+```{R Autoencoder model 5}
+x_col <- setdiff(colnames(dldb), c())
+dlmodel5 <- h2o.deeplearning(x = x_col,
+                             training_frame = train,
+                             model_id = "model",
+                             autoencoder = TRUE,
+                             hidden = c(10, 5, 1, 5, 10), 
+                             epochs = 40,
+                             activation = "Tanh",
+                             seed = 1041)
+ datatable(
+    dlmodel5@model$variable_importances,
+    rownames = FALSE, 
+    colnames=c("Variable","relative_importance","scaled_importance","percentage"),
+    options = list(columnDefs=list(list(className = 'dt-center', targets = 0:5)))
+    )
+
+```
+
+MSE: 0.0259219
+
+RMSE: 0.1610028
+
+```{R Deepfeatures Model 5}
+#Deepfeatures with dlmodel
+train_features5 <- h2o.deepfeatures(dlmodel5, train, layer = 1) %>% 
+  as.data.frame() 
+
+ggplot(train_features5, aes(DF.L1.C1, DF.L1.C2, color = DF.L1.C3)) + 
+  geom_point(alpha = 0.1) +
+  ggtitle('Deepfeatures 2nd layer Extracted for 10,1,10 Model')
+
+```
+
+## Summary
+The deep learning network which had the lowest RMSE and MSE was the one with the highest low layer (with 5- Model2). However when taking out the deepfeatures of that model it was the least interpretable. The models which have smallest level of its lowest layers (2 or 1) showed that MSE and RMSE values are higher however the model seems to do a better job of isolating specific outliers in the data. It was also found that adding layers to the model does not move the MSE and RMSE values too much, as shown in the last model ran. 
+
+## Insight
+The consistency of the important of the discharge per payment feature shows that this is an important variable to monitor and how it translates to the outliers within the dataset. The model which put the highest importance in this variable was 3 (with 4,1,4 hidden layers) which it explained 33.3% of the total. 
+
+In order to create the most meaningful insight from these models, it is important to know the best ways to backtrack and identify the instances that align the outliers that are identified by different iteraitons of the deep learning results. 
+
+# Conclusion
+In this assignment we continued to apply unsupervised learning techniques to the healthcare dataset by running an SVD model and autoencoder deep learning techniques.
+
+The SVD model allows the modeler to have a slightly more interpretable result than running PCA results. It takes the orthogonal positions of the dataset, using eigen values, to create a final groupings coupled with standard deviations that together explain a certain amount of the variance in the dataset. 
+
+Using the deep learning as a paradigm, we learned how different iterations of the model can cause varying results in the different layers, as shown in the MSE, RMSE, and the variable importance of each model. The efficiency and 'black box' nature of the deeplearning model however are very conducive to analyzing the results from different iterations of how parameters are set for the model. 
+
+In the future, it would be good to get a better grasp of how to isolate and understand the outliers that are created by the deep learning models. There was difficulty in working with the model to have it be able to be run for the h2o.anomaly().Being able to backtract from creating the deep learning will allow us to create greater amount of insight and business value to how to identify the right outliers which may highlight suspicious procedures. 
+

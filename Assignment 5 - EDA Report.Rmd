@@ -1,0 +1,482 @@
+---
+title: "Assignment 5 - EDA Report"
+author: "Marko Konte"
+date: "7/2/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(ggplot2)
+library(data.table)
+library(zipcode)
+library(tidyverse)
+library(stringr)
+library(ggthemes)
+library(DT)
+library(usmap)
+library(shiny)
+suppressPackageStartupMessages(library(maps))
+
+
+data(zipcode)
+nrow(zipcode)
+zipcode$city <- as.factor(zipcode$city)
+zipcode$state <- as.factor(zipcode$state)
+
+payment <- read.csv("inpatientCharges.csv", stringsAsFactors = T)
+
+# Convert the average to numeric
+p1 <- strsplit(x = as.character(payment$Average.Covered.Charges),split = "$",fixed = T)
+payment$Average.Covered.Charges <- as.numeric(sapply(p1,"[[",2))
+p1 <- strsplit(x = as.character(payment$Average.Total.Payments),split = "$",fixed = T)
+payment$Average.Total.Payments <- as.numeric(sapply(p1,"[[",2))
+p1 <- strsplit(x = as.character(payment$Average.Medicare.Payments),split = "$",fixed = T)
+payment$Average.Medicare.Payments <- as.numeric(sapply(p1,"[[",2))
+rm("p1")
+
+scale_this <- function(x){
+  (x - mean(x, na.rm=TRUE)) / sd(x, na.rm=TRUE)
+} #Function to scale the data 
+
+```
+
+## EDA Report
+
+Dataset Basics: 
+
+- 12 features, 164,065 observations
+
+- Primary cost based variables (Average.Total.Payment, Average.Covered.Charges, Average.Medicare.Payments) need to turned to numeric to use 
+
+- Since there is no indipendant variable identifying an instance of fraud (this is a common problem in the healthcare fraud detection space), the analysis will rely on identifying individual providers and procedures which had irregularities. 
+
+- Since coverage payments can vary accross state, there could be variance in this variable that could be cause a false positive in identifying a potential fraudulent example. 
+
+Fraud in healthcare can be implemented in several ways, but there are generally only three purpetrators- Healthcare Providers, Beneficiaries, and insurance carriers. The dataset allows us to identify potential providers that have suspicious payments made through meidcare for various procedures provided. 
+
+The dataset provides us with ample data on the Provider, Procedure, and State as well as cost related items such as Average Total Payment, Coverage Charges, Average Medicare payments, and Total Discharges by procedure. 
+
+**Key Variable Descriptions**
+
+DRG Definition:	
+
+Classification system that groups similar clinical conditions (diagnoses) and the procedures furnished by the hospital during the stay.
+
+```{R DRG}
+drg <- payment %>% group_by(DRG.Definition) %>%
+  summarise(Count = n()) %>% 
+  arrange(desc(Count))
+
+datatable(
+  drg,
+  rownames = FALSE, 
+  colnames=c("DRG.Definition", 'Count'),
+  options = list(columnDefs=list(list(className = 'dt-center', targets = 0:2)))
+)
+
+```
+
+Total Discharges:	
+
+The number of discharges billed by all providers for inpatient hospital services.
+
+This number will be the baseline value to use to determine the frequency of a particular procedure being done. 
+
+``` {R Discharge}
+summary(payment$Total.Discharges)
+```
+
+Average Covered Charges:	
+
+The average charge of all provider's services covered by Medicare for discharges in the DRG. These will vary from hospital to hospital because of differences in hospital charge structures.
+
+This variable has the highest value of charges amongst all variables within the dataset accross all measures of median. While this variable can differ by provider and state, it will be important to pay attention to due to the risk of fraud coming from medicare payments to dicharged patients. 
+
+```{R Covered Charges}
+summary(payment$Average.Covered.Charges)
+
+```
+
+Average Total Payments:	
+
+The average total payments to all providers for the DRG including the MS-DRG amount, teaching,  disproportionate share, capital, and outlier payments for all cases. Also included in average total payments are co-payment and deductible amounts that the patient is responsible for and any additional payments by third parties for coordination of benefits.
+
+Looking at the variable there is a lot of variance in the total pament for a procedure. With a minimum of 1 dollar, there are many instances where there is an illogical disparity between payments and other numeric factors. 
+
+``` {R Total Payments, Include=FALSE}
+summary(payment$Average.Total.Payments)
+
+```
+
+Average Medicare Payments
+
+The average amount that Medicare pays to the provider for Medicare's share of the MS-DRG. Medicare payment amounts include the MS-DRG amount, teaching,  disproportionate share, capital, and outlier payments for all cases. Medicare payments DO NOT include beneficiary co-payments and deductible amounts nor any additional payments from third parties for coordination of benefits.
+
+Average Medicare Payments have about a 66% correlation with Total Payments in the dataset. The differences between the two are highlighted even more with the max value of medicare being higher than that of average total pamyments. 
+
+``` {R Average Medicare Payments}
+summary(payment$Average.Medicare.Payments)
+
+```
+
+Provider Name: 
+The title of the healtchare institution providing the care for the patient. Detecting fraud through this data will be important to find anomalies within the payments provided by providers per certain procedures. 
+
+The tables created below allows us to take a look at the amount of procedures that are given in the dataset by state and provider as well as by zipcode of a provider. THe names of hospitals repeate throughout states. Good Samaritan Hospital, for example, has 633 procedures in the dataset accross the country, followed by St. Joseph's with 427, and Medcy Medical Center with 357. 
+
+``` {r Vendor, include=FALSE}
+
+ProviderperState <- payment %>% group_by(Provider.Name, Provider.State) %>%
+  summarise(Count = n()) %>%
+  arrange(desc(Count))
+
+#Providers Per State
+datatable(
+  ProviderperState,
+  rownames = FALSE, 
+  colnames=c("Provider.Name", "Provider.State", "Count"),
+  options = list(columnDefs=list(list(className = 'dt-center', targets = 0:3)))
+)
+
+#Providers per ZipCode per state
+
+ProviderZip <- payment %>% mutate(StateZip = paste(Provider.State, 
+                             Provider.Zip.Code, sep="_")) %>% 
+  group_by(Provider.Name, StateZip) %>%
+  summarise(Count = n()) %>%
+  arrange(desc(Count))
+
+datatable(
+  ProviderZip,
+  rownames = FALSE, 
+  colnames=c("Provider.Name", "StateZip", "Count"),
+  options = list(columnDefs=list(list(className = 'dt-center', targets = 0:3)))
+)
+
+```
+
+
+As stated, the most striking aspect of looking at relationships between numeric data is that there are clear discrepancies between an average total payments and how many funds were spent via medicare for the procedure or for covered charges. This shows that there are many instances where the total amount of covered charges and medicare payments exceeded that of average total payments for the procedure. This is indicative of potential fraud from the provider. 
+
+**Initial EDA**
+
+Normalizing the numeric values of the key numeric variables in the dataset. 
+
+``` {r EDA 1}
+
+#Scaled values of numeric variables
+Scaled <- payment %>% mutate(DRGState = paste(Provider.State, 
+                                              DRG.Definition, sep="_"),                    
+                             ScTotPay = scale_this(Average.Total.Payments),
+                             ScTotCov = scale_this(Average.Covered.Charges),
+                             ScTotMed = scale_this(Average.Medicare.Payments),
+                             ScTotDis = scale_this(Total.Discharges))
+
+ScaledSum <- Scaled %>% dplyr::group_by(DRGState) %>%
+  dplyr::summarise(Count = n(),
+                   ScTotPay = sum(ScTotPay),
+                   ScTotCov = sum(ScTotCov),
+                   ScTotMed = sum(ScTotMed),
+                   ScTotDis = sum(ScTotDis))
+summary(ScaledSum)
+
+#Breaking down standard deviation of Total Payments per state
+
+TotPayST <- payment %>% dplyr::group_by(Provider.State) %>%
+            dplyr::summarise(Count = n(),
+                   TotPay = sum(Average.Total.Payments/1000),
+                   TotCov = sum(Average.Covered.Charges/1000),
+                   TotMed = sum(Average.Medicare.Payments/1000),
+                   TotDis = sum(Total.Discharges),
+                   SD = sd(Average.Total.Payments),
+                   PayPerDis = sum((Average.Total.Payments/Total.Discharges)/1000)) %>%
+  dplyr::arrange(desc(SD))
+
+#Top 10 Average payments per state
+map1 <- TotPayST[1:10,]
+ggplot(data=map1, aes(x=reorder(Provider.State, TotPay),y=TotPay, fill = SD)) +
+  geom_bar(position="dodge",stat="identity") + 
+  coord_flip() +
+  ggtitle("   Total Payment per State with SD") +
+  ylab('Total Average Payment per state in thousands') +
+  xlab('State')
+
+#Visualizing payment with SD accross the country
+TotPayST_Merge <- TotPayST %>% select(Provider.State, SD) %>% 
+  merge(zipcode, by.x= "Provider.State", by.y= "state")
+
+TotPayST_Merge <- as.data.frame(TotPayST_Merge[,c('Provider.State','SD')]) 
+colnames(TotPayST_Merge) <- c('state', 'Standard Dev')
+
+map<-plot_usmap(data=TotPayST_Merge,values = 'Standard Dev')
+
+map+
+  scale_fill_continuous(name="SD of Total Payments",low="white",high="blue")+
+  ggtitle("Standard deviation of Total Payments accross the state")+
+  theme(plot.title = element_text(hjust = 0.5))
+
+#Scaled payments grouped by DRG + State and Provider
+Scaled2 <- payment %>% mutate(DRGState = paste(Provider.State, 
+                                              DRG.Definition, sep="_"),                  
+                             ScTotPay = scale_this(Average.Total.Payments),
+                             ScTotCov = scale_this(Average.Covered.Charges),
+                             ScTotMed = scale_this(Average.Medicare.Payments),
+                             ScTotDis = scale_this(Total.Discharges)) %>% 
+  group_by(Provider.Name, DRGState)
+
+```
+
+We were able to identify the scaled values of the most numeric variables and identify which specific states have large instances of each numeric value. 
+
+Next we will look to calculate the differences betwen these values to see peculiar outliers between the payment of a procedure to state. 
+
+``` {r EDA 2}
+#Taking differences between numeric values
+
+TotPaymMed1 <- payment %>% mutate(DRGState = paste(Provider.State, 
+                                                   DRG.Definition, sep="_")) %>% 
+                                    dplyr::group_by(DRGState, Provider.Name) %>%
+                  dplyr::summarise(Count = n(),
+                   PayMedDiff = (sum(Average.Total.Payments)-sum(Average.Medicare.Payments)), #Total Payments minus Medicare payments. Negative value indicates more spent in Medicare than overall procedure. 
+                   CovMedDiff = (sum(Average.Covered.Charges)-sum(Average.Medicare.Payments)/1000), #Covered charges minus medicare payments (negative value implies medicare spent more than was covered)
+                   CovTotDiff = (sum(Average.Covered.Charges)-sum(Average.Total.Payments))) #Covered Charges minus total payment. Positive value indicates more spent on discharge covered charges than total payments 
+
+#Top 10 total payment minus medicare biggest differences where Medicare Payments were larger
+map2 <- TotPaymMed1 %>% arrange(PayMedDiff)
+map2 <- map2[1:10,]
+ggplot(data=map2, aes(x=reorder(Provider.Name, PayMedDiff),y=PayMedDiff, fill = DRGState)) +
+  geom_bar(position="dodge",stat="identity") + 
+  coord_flip() +
+  ggtitle("   10  least Total Payments minus Medicare payments") +
+  ylab('Difference between total Payment and Medicare') +
+  xlab('State') + 
+  theme(legend.position="bottom")
+
+#Top 10 differences where Covered Payments were higher than Medicare Payments
+map3 <- TotPaymMed1 %>% arrange(desc(CovMedDiff))
+map3 <- map3[1:10,]
+ggplot(data=map3, aes(x=reorder(Provider.Name, CovMedDiff),y=CovMedDiff, fill = DRGState)) +
+  geom_bar(position="dodge",stat="identity") + 
+  coord_flip() +
+  ggtitle("Top 10 Total Covered Payments higher than Medicare Payments") +
+  ylab('Difference between total Payment and Medicare scaled to thousands (div by 1000)') +
+  xlab('State') + 
+  theme(legend.position="bottom")
+
+#Top 10 differences where Covered Payments were higher than Total Payment
+map4 <- TotPaymMed1 %>% arrange(desc(CovTotDiff))
+map4 <- map4[1:10,]
+ggplot(data=map3, aes(x=reorder(Provider.Name, CovTotDiff),y=CovTotDiff, fill = DRGState)) +
+  geom_bar(position="dodge",stat="identity") + 
+  coord_flip() +
+  ggtitle("Top 10 Total Covered Payments higher than Total Average Payments") +
+  ylab('Difference between covered payments and total payments (div by 1000)') +
+  xlab('State') + 
+  theme(legend.position="bottom")
+
+
+#Scaling the values from above
+TotPaymMed1Sc <- TotPaymMed1 %>% mutate(PayMedDiffSc = scale_this(PayMedDiff),
+                                        CovMedDiffSc = scale_this(CovMedDiff),
+                                        CovTotDiffSc = scale_this(CovTotDiff)) %>% ungroup()
+TotPaymMed1Sc$PayMedDiffSc[is.na(TotPaymMed1Sc$PayMedDiffSc)] <- 0
+TotPaymMed1Sc$CovMedDiffSc[is.na(TotPaymMed1Sc$CovMedDiffSc)] <- 0
+TotPaymMed1Sc$CovTotDiffSc[is.na(TotPaymMed1Sc$CovTotDiffSc)] <- 0
+
+```
+
+We have identified the largest discrepancies between the three key numeric cost based variables for procedures. This data was used to group by the provider name with the state and procedured taken from the figures. This allowed us to identify the largest discrepancies between payment discrepancies, which are.
+
+Finally, we will look at the fractional significance of these variables to Average Total Payments of the procedure. 
+
+
+```{r EDA 3}
+#Fractions between all numeric values
+
+PercTot <- payment %>% mutate(DRGState = paste(Provider.State, 
+                                                 DRG.Definition, sep="_")) %>%
+  group_by(Provider.Name, DRGState) %>%
+  summarise(Count = n(),
+            TotalPayments = sum(Average.Total.Payments),
+            MedicarePayments = sum(Average.Medicare.Payments),
+            CoveredCharges = sum(Average.Covered.Charges),
+            Discharges = sum(Total.Discharges),
+            MedPerc = round(MedicarePayments/TotalPayments,2), #% of medicare payments to the total payments of procedures. 
+            CovPerc = round(CoveredCharges/TotalPayments,2), #% of covered changes to the total payments of procedures
+            DisPerc = round(Discharges/TotalPayments,2), #% of total discharges to the total payments of a procedure. 
+            MedPerDis = round(TotalPayments/Discharges,2)) %>% #Average medicare payment per discharge for the procedure
+  ungroup()
+
+#Paymet per discharge per state
+ggplot(data=TotPayST, aes(x=reorder(Provider.State, PayPerDis),y=PayPerDis)) +
+  geom_bar(position="dodge",stat="identity") + 
+  coord_flip() +
+  ggtitle(" Average Total Payment per Discharge per State") +
+  ylab('Total Average Payment per Discharge per State in thousands') +
+  xlab('State')
+
+#Scaling the precentages
+PercTotSc <- PercTot %>% mutate(MedPerc = scale_this(MedPerc),
+                            CovPerc = scale_this(CovPerc),
+                            DisPerc = scale_this(DisPerc),
+                            MedPerDis = scale_this(MedPerDis))
+
+#Top Average Medicare to Total Payment providers by Procedure and State
+map5 <- PercTot %>% arrange(desc(MedPerc))
+map5 <- map5[1:10,]
+ggplot(data=map5, aes(x=reorder(Provider.Name, MedPerc),y=MedPerc, fill = DRGState)) +
+  geom_bar(position="dodge",stat="identity") + 
+  coord_flip() +
+  ggtitle(" Top 10 Total Medicare Payment over Total Payment") +
+  ylab('Fraction of Total Medicare Payment to Total Payment') +
+  xlab('State') + 
+  theme(legend.position="bottom")
+
+
+#Top Average Medicare to Total Payment providers by Procedure and State (Above 1 Quartile Total Payments)
+map5 <- PercTot %>% arrange(desc(MedPerc)) %>% filter(TotalPayments > 39551)
+map5 <- map5[1:10,]
+ggplot(data=map5, aes(x=reorder(Provider.Name, MedPerc),y=MedPerc, fill = DRGState)) +
+  geom_bar(position="dodge",stat="identity") + 
+  coord_flip() +
+  ggtitle("   Top 10 Total Medicare Payment over Total Payment") +
+  ylab('Fraction of Total Medicare Payment to Total Payment') +
+  xlab('State') + 
+  theme(legend.position="bottom")
+
+
+```
+
+
+
+## Getting Variables ready for Dimensionality reduction
+
+We will isolate all variables that will be used in dimensionality reduciton process. We will also create a train and test set. The process of applying dimensionality reduction techniques will be done on the train set due to the efficiency of computational power. 
+
+``` {r dataprep }
+FinalDB <- payment %>% mutate(DRGState = paste(Provider.State, 
+                                                DRG.Definition, sep="_"))
+
+FinalDB <- select(FinalDB, Provider.Id, Provider.Name, Provider.Zip.Code, Average.Covered.Charges,
+                  Average.Total.Payments, Average.Medicare.Payments, Total.Discharges, 
+                  DRGState) 
+
+#install.packages('caret')
+library(caTools)
+library(plyr)
+split = sample.split(payment, SplitRatio = 0.5)
+train = subset(payment, split == TRUE)
+test = subset(payment, split == FALSE)
+
+train <- train %>% mutate(DRGState = paste(Provider.State, 
+                                           DRG.Definition, sep="_"))
+
+train <- select(train, Provider.Id, Provider.Name, Provider.Zip.Code, Average.Covered.Charges,
+                Average.Total.Payments, Average.Medicare.Payments, Total.Discharges, 
+                DRGState) 
+
+#Scaled Absolute numeric values
+train <- train %>% mutate(                    
+  ScTotPay = scale_this(Average.Total.Payments),
+  ScTotCov = scale_this(Average.Covered.Charges),
+  ScTotMed = scale_this(Average.Medicare.Payments),
+  ScTotDis = scale_this(Total.Discharges))
+
+#Adding values from DIfferences Table
+train <- train %>% left_join(TotPaymMed1Sc, by=c("DRGState","Provider.Name"))
+
+#Adding scaled values from the percentages variables
+train <- train %>% left_join(PercTotSc, by='DRGState','Provider.Name')
+
+
+```
+
+##Dimensionality Reduction
+
+First we will apply Principle Component Analysis to our data in order to find significance behind the figures. PCA groups the factors in variables that discribe the relationship between the objects. 
+
+``` {r PCA}
+
+##PCA 1
+trainPCADB <- train %>% select(Provider.Id, ScTotPay, ScTotCov, ScTotMed, ScTotDis,
+                             PayMedDiffSc, CovMedDiffSc, CovTotDiffSc, MedPerc, DisPerc, CovPerc,
+                             MedPerDis)
+
+trainPCA <- prcomp(trainPCADB,
+                   center = TRUE,
+                   scale. = TRUE) 
+
+summary(trainPCA)
+screeplot(trainPCA, type = 'line', main = 'Scree Plot')
+
+variance.explained = prop.table(trainPCA$sdev)
+plot(variance.explained, main = 'Variable Importance', type = 'barplot')
+
+##PCA 2
+trainPCA2DB <- train %>% select(Provider.Id, ScTotPay, ScTotMed,PayMedDiffSc, CovMedDiffSc, 
+                              CovTotDiffSc, MedPerc, DisPerc, CovPerc, MedPerDis)
+
+trainPCA2 <- prcomp(trainPCA2DB,
+                   center = TRUE,
+                   scale. = TRUE)
+
+summary(trainPCA2)
+screeplot(trainPCA2, type = 'line', main = 'Scree Plot')
+
+variance.explained = prop.table(trainPCA$sdev)
+plot(variance.explained, main = 'Variable Importance', type = 'barplot')
+
+#PCA 3
+trainPCA3DB <- train %>% select(Provider.Id, ScTotMed,PayMedDiffSc, 
+                                CovTotDiffSc, MedPerc, DisPerc, CovPerc, MedPerDis)
+
+trainPCA3 <- prcomp(trainPCA3DB,
+                    center = TRUE,
+                    scale. = TRUE) 
+
+summary(trainPCA3)
+screeplot(trainPCA3, type = 'line', main = 'Scree Plot')
+
+variance.explained = prop.table(trainPCA3$sdev)
+plot(variance.explained, main = 'Variable Importance', type = 'barplot')
+
+
+```
+
+**Conclusion:**
+By taking all of the scaled numeric values that we use and combining them, the first two PCA's described about 40% of the variance in the dataset. The less variables that were used, the more of the variance was explained by the first two PCA instances.
+
+With a collection of different intertwining variables, the variation in eigenvectors created causes. Going forward in our analysis for healthcare fraud, it will be critical to try different iteration of our features engineered and compare the performance of the components generated. 
+
+``` {r SVD}
+
+trainSVD <- train %>% select(Provider.Id, ScTotPay, ScTotCov, ScTotMed, ScTotDis,
+                             PayMedDiffSc, CovMedDiffSc, CovTotDiffSc, MedPerc, DisPerc, CovPerc,
+                             MedPerDis)
+
+trainSVD <- svd(trainSVD)
+
+summary(trainSVD)
+
+```
+
+SVD is a similar approach to PCA but does not calculate its clusters from the center point which is the focus of PCA. 
+
+***Final Conclusion***
+
+In this report we went through the preliminary research around the Healthcare fraud dataset. In focusing on the relatonship between cost based variables and procedures done, the providers, and states that the procedures took place, we identified important identifiers of potential fraud in the industry. 
+
+EDA: 
+- Scaling of key cost based numeric variables.
+- Differences in key cost based numeric variables, focusing on categories where there should not be differences.
+- Taking fractions of key variables to the total payments. 
+
+Dimension Reduction: 
+- PCA: We had run three different versions of key variables identified through a PCA algorithim. The lowest variance achieved within the first two Principle Components identified was 53%. 
+- SVD: We earn an SVD model format on the dataset. This showed some variation in the end result as compared to PCA. 
+
+Going forward: We will apply more specific hyperparameters around the dimension reduction and clustering algorithims applied to the dataset. In addition, we will continue to improve the features created through approaches such as binning and further normalizing techniques to make variables. Finally, these will be used in creating an unsupervised predictive model to identify fraud within US healthcare system. 
+

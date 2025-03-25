@@ -1,0 +1,404 @@
+---
+title: "Assignment 6 - Unsupervised Machine Learning Techniques"
+author: "Marko Konte"
+date: "7/9/2019"
+output: html_document
+---
+
+##Introduction
+
+In this section we will be going through exmaples of unsupervised models on the healthcare dataset. 
+
+First, lets read the data and convert the key cost based variables to numeric. 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(ggplot2)
+library(data.table)
+library(zipcode)
+library(tidyverse)
+library(stringr)
+library(ggthemes)
+library(DT)
+library(usmap)
+library(fpc)
+library(factoextra)
+suppressPackageStartupMessages(library(maps))
+
+
+payment <- read.csv("inpatientCharges.csv")
+
+# Convert the average to numeric
+p1 <- strsplit(x = as.character(payment$Average.Covered.Charges),split = "$",fixed = T)
+payment$Average.Covered.Charges <- as.numeric(sapply(p1,"[[",2))
+p1 <- strsplit(x = as.character(payment$Average.Total.Payments),split = "$",fixed = T)
+payment$Average.Total.Payments <- as.numeric(sapply(p1,"[[",2))
+p1 <- strsplit(x = as.character(payment$Average.Medicare.Payments),split = "$",fixed = T)
+payment$Average.Medicare.Payments <- as.numeric(sapply(p1,"[[",2))
+rm("p1")
+
+
+
+```
+
+
+## Capping and Flooring
+Next we will take the dataset and create two functions which will help in normalizing the different features to be ready for using in a model ultimately. First, the 'fun' function will 
+
+```{r cars}
+#Function for capping and flooring of data
+#Capping and flooring 
+fun <- function(x){
+  quantiles <- quantile( x, c(.05, .95 ) )
+  x[ x < quantiles[1] ] <- quantiles[1]
+  x[ x > quantiles[2] ] <- quantiles[2]
+  x
+}
+
+#Function to Scale the data
+scale_this <- function(x){
+  (x - mean(x, na.rm=TRUE)) / sd(x, na.rm=TRUE)
+}  
+
+#Applying capping and flooring to data
+payment <- payment %>% dplyr::mutate(Total.Discharges = fun(Total.Discharges),
+                                     Average.Covered.Charges = fun(Average.Covered.Charges),
+                                     Average.Total.Payments = fun(Average.Total.Payments),
+                                     Average.Medicare.Payments = fun(Average.Medicare.Payments))
+
+
+```
+
+## EDA
+
+In order to prepare the variables for inputting models to the dataset, we will make several modicafations with the kay cost based data points in the dataset. The process of creating the variables is at follows: 
+
+1. Summing all cost based variables. After capping and flooring the key data points we will sum each individual cost based variable. In order to get it prepared to run on a clustering model, we will scale then scale these figures. 
+
+2. Taking the differences from key variables. We will rely on total payments as a baseline and calculate the difference from medicare payments and covered charges. In addition, we will calculate the difference between covered charges and mediare per procedure and state. 
+
+3. Making key ratios from the cost based variables and total discharge. We will look at the ratio between covered charges and medicare to total payments. In addition, we identify the total payments per discharge, medicare payments per discharge, and covered payments per discharge
+
+
+```{r pressure, echo=FALSE}
+
+#Grouping values by procedure, state that shows the total of key cost based variables and identifying standard deviation of total payments
+
+TotPayST <- payment %>% mutate(DRGState = paste(Provider.State, 
+                                               DRG.Definition, sep="_")) %>% 
+                                 dplyr::group_by(DRGState, Provider.Name) %>%
+                  dplyr::summarise(Count = n(),
+                   TotPay = sum(Average.Total.Payments), #Sums together of all total payments per procedure and state
+                   TotCov = sum(Average.Covered.Charges), #Sums together all covered charges per procedure and state
+                   TotMed = sum(Average.Medicare.Payments), #Sums together all medicare payments per procedure and state 
+                   TotDis = sum(Total.Discharges)) #Sums together all discharges per procedures and state 
+
+
+#Scaling the figures from total scaled object above
+Scaled <- TotPayST %>% mutate(ScTotPay = scale_this(TotPay),
+                              ScTotCov = scale_this(TotCov),
+                              ScTotMed = scale_this(TotMed),
+                              ScTotDis = scale_this(TotDis)) %>% 
+  group_by(DRGState, Provider.Name)
+Scaled$ScTotPay[is.na(Scaled$ScTotPay)] <- 0
+Scaled$ScTotCov[is.na(Scaled$ScTotCov)] <- 0
+Scaled$ScTotMed[is.na(Scaled$ScTotMed)] <- 0
+Scaled$ScTotDis[is.na(Scaled$ScTotDis)] <- 0
+
+#Taking differences between numeric values to identify outliers in amount of cost per procedure + state
+
+TotPaymMed1 <- payment %>% mutate(DRGState = paste(Provider.State, 
+                                                   DRG.Definition, sep="_")) %>% 
+                                    dplyr::group_by(DRGState, Provider.Name) %>%
+                                    dplyr::summarise(Count = n(),
+                   PayMedDiff = (sum(Average.Total.Payments)-sum(Average.Medicare.Payments)), #Total Payments minus Medicare payments. Negative value indicates more spent in Medicare than overall procedure. 
+                   CovMedDiff = (sum(Average.Covered.Charges)-sum(Average.Medicare.Payments)), #Covered charges minus medicare payments (negative value implies medicare spent more than was covered)
+                   TotCovDiff = (sum(Average.Total.Payments)-sum(Average.Covered.Charges))) #Total Payments minus Covered Charges. Negative value indicates more spent on discharge covered charges than total payments 
+
+#Scaling the values from above
+TotPaymMed1Sc <- TotPaymMed1 %>% mutate(PayMedDiffSc = scale_this(PayMedDiff),
+                                        CovMedDiffSc = scale_this(CovMedDiff),
+                                        CovTotDiffSc = scale_this(TotCovDiff)) %>% ungroup()
+TotPaymMed1Sc$PayMedDiffSc[is.na(TotPaymMed1Sc$PayMedDiffSc)] <- 0
+TotPaymMed1Sc$CovMedDiffSc[is.na(TotPaymMed1Sc$CovMedDiffSc)] <- 0
+TotPaymMed1Sc$CovTotDiffSc[is.na(TotPaymMed1Sc$CovTotDiffSc)] <- 0
+
+summary(TotPaymMed1Sc)
+
+#Making ratios between all of the key numeric cost values
+PercTot <- payment %>% mutate(DRGState = paste(Provider.State, 
+                                               DRG.Definition, sep="_")) %>%
+            group_by(Provider.Name, DRGState) %>%
+            dplyr::summarise(Count = n(),
+                   TotalPayments = sum(Average.Total.Payments),
+                   MedicarePayments = sum(Average.Medicare.Payments),
+                   CoveredCharges = sum(Average.Covered.Charges),
+                   Discharges = sum(Total.Discharges),
+                   MedPerc = round(MedicarePayments/TotalPayments,2), #% of medicare payments to the total payments per procedure in a state. 
+                   CovPerc = round(CoveredCharges/TotalPayments,2), #% of covered changes to the total payments of procedures in a state
+                   DisPerc = round(Discharges/TotalPayments,2), #% of total discharges to the total payments of a procedure. 
+                   MedPerDis = round(MedicarePayments/Discharges,2), #Average medicare payment per discharge for the procedure in a state
+                   TotPerDis = round(TotalPayments/Discharges,2), #Average total payment per discharge for the procedure in a state
+                   CovPerDis = round(CoveredCharges/Discharges,2)) %>% #Average total payment per discharge for the procedure in a state
+            ungroup()
+
+#Scaling the ratio values created in the PercTot object
+PercTotSc <- PercTot %>% mutate(ScMedPerc = scale_this(MedPerc),
+                                ScCovPerc = scale_this(CovPerc),
+                                ScDisPerc = scale_this(DisPerc),
+                                ScMedPerDis = scale_this(MedPerDis),
+                                ScTotPerDis = scale_this(TotPerDis),
+                                ScCovPerDis = scale_this(CovPerDis))
+
+
+```
+
+##Extracting features to be used in Model and creating Training set
+
+Next, we will take the features that were created from the dataset and create a training set to run various models on. In order to run the models, we will isolate all numeric variables and create the DRGState variables to be able to join the summarised values from above to the dataset. Since the models take a significant amount of computational power, we will use a lesser number of observations within the training set to run the models created. 
+
+```{r Setting Train and FinalDB Set}
+
+#Model set with without any splitting
+
+FinalDB <- payment %>% mutate(DRGState = paste(Provider.State, 
+                                               DRG.Definition, sep="_"))
+
+FinalDB <- select(FinalDB, Provider.Id, Provider.Name, Provider.Zip.Code, Average.Covered.Charges,
+                  Average.Total.Payments, Average.Medicare.Payments, Total.Discharges, 
+                  DRGState) 
+
+#Train set setup
+library(caTools)
+split = sample.split(payment, SplitRatio = 0.1)
+train = subset(payment, split == TRUE)
+test = subset(payment, split == FALSE)
+
+train <- train %>% mutate(DRGState = paste(Provider.State, 
+                                           DRG.Definition, sep="_"))
+
+train <- select(train, Provider.Id, Provider.Name, Provider.Zip.Code,Average.Covered.Charges,
+                Average.Total.Payments, Average.Medicare.Payments, Total.Discharges, 
+                DRGState) 
+
+#Scaled version of key numeric cost variables 
+train <- train %>% left_join(Scaled, by=c("DRGState", "Provider.Name"))
+
+#Adding values from DIfferences Table
+train <- train %>% left_join(TotPaymMed1Sc, by=c("DRGState","Provider.Name"))
+
+#Adding scaled values from the percentages variables
+train <- train %>% left_join(PercTotSc, by=c("DRGState","Provider.Name"))
+
+
+```
+
+##DBSCAN
+
+This method takes the ability measure different clusters within the dataset by measuring the shortest distances between points using eucladian distance to identify nearest ones. The model has two key parameters that need to be set, eps identifies how close an observation needs to be to be within a cluster, while MinPts identifies how many observations need to be within that distance in order to be considered a cluster. If the model does not identify the MinPts number of data points within the eps distance in the matrix, it labels those points as 'noise'. The model moves along the matrix calculating and searching for proximity and  state counts of data to create a clusters until there are no more data points covered.  
+
+
+``` {r DBSCAN process}
+
+#DBSCan
+
+dbscanset <- select(train, ScTotPay, ScTotCov, ScTotMed, ScTotDis,
+                           PayMedDiffSc, CovMedDiffSc, CovTotDiffSc, 
+                           ScMedPerc, ScCovPerc, ScMedPerDis,
+                           ScTotPerDis, ScCovPerDis, ScDisPerc)
+
+db <- fpc::dbscan(dbscanset, eps = 0.55, MinPts = 5) 
+db
+
+table(db$cluster)
+
+# Plot DBSCAN results
+data("multishapes")
+plot(db,multishapes$y, main = "Multi-shapes identified by DBSCAN", frame = FALSE)
+
+#Running a PCA Analysis on the DBSCAN results
+dbsPCA <- prcomp(dbscanset)
+dbsPCA
+plot(dbsPCA, main = "Healthcare Fraud Clusters identified by DBCScan", frame = FALSE)
+ggbiplot::ggbiplot(dbsPCA)
+
+#Ranking per cluster instances
+db_with_cluster = dbscanset
+db_with_cluster['dbscan_cluster'] = db$cluster
+head(db_with_cluster)
+
+db_with_clusterT <- db_with_cluster[,9:14]
+datatable(
+    db_with_clusterT,
+    rownames = FALSE, 
+    colnames=c("Cove/Tot","Med/Discharge", "Pay/Discharge","Cov/Discharge","Discharge%","Cluster"),
+    options = list(columnDefs=list(list(className = 'dt-center', targets = 0:5)))
+    )
+
+#DBSCAN 2 #Too much computing time to include in an RMarkdown for submittal
+#dbscanset2 <- select(train, ScTotPay, ScTotCov, ScTotMed, ScTotDis,
+                     #PayMedDiffSc, CovMedDiffSc, CovTotDiffSc, 
+                     #MedPerDis, ScMedPerc, ScCovPerc, ScMedPerc, ScMedPerDis,
+                     #ScTotPerDis, ScCovPerDis, ScDisPerc, ScCovPerc)
+
+#dbs2 <- fpc::dbscan(dbscanset2, eps = 0.01, MinPts = 99)
+#summary(dbs2$cluster)
+
+#table(dbs2$cluster)
+#plot(dbs2,multishapes, main = "Multi-shapes identified by DBSCAN", frame = FALSE)
+#plot(dbs2,multishapes$y, main = "Multi-shapes identified by DBSCAN", frame = FALSE)
+
+```
+
+*Summary statistics for the variables by cluster:*
+
+Since the variables in the dbcluster object are relatively close together, it was important to use a higher eps parameter as well as a higher minPts. This would allow the DBScan model to cluster shorter values within the overall model. Meanwhile the MinPts parameter was more succesful in identifying clusters when it was at a higher value. The reason the higher value was more relevant for this model is because there were 14 seperate dimensions used. This also made this model very hard to work with because it took so much computational time. Thus, with a mPoints of 5 and a relatively low eps the model did not make a significant amount of clusters and left with a lot of noise in the model. 
+
+*Outliers?* 
+
+There were several outliers within clusters found within the top end of led by difference between total payment and medicare leading to the main variable within that. This can also be supported by the PCA analysis with the selected features run on the DBScan model. However due to the amount of variables that were within the 0 cluster, it suggests that there was too much noise in the model itself. This would 
+
+*Insight* 
+
+There would need to be further analysis of the variables which were clear outlier within the plotted data from the DBScan model. In order to make further and meangingful insightful analysis however, the model would need to be run with better suitted parameters on EPS and MinPts. The outliers within the identified clusters are focused on those that are outside of the main groupings in od the model (seen in the plot chart), whereas the 'noise' that is close to the large groupings would presumbly be captured within a cluster with a higher eps or MinPts parameter. 
+
+##Meanshift
+
+The meanshift model takes a similar approach to DBSCAN but instead of using centerpoints, it moves along the dense areas of the dataset in order to identify which items belong to a cluster. It is considered a 'hill climbing' algorithim since it begins to calculate the clusters starting at a random point and then calculating which are the nearest features within the dataset. Since it looks for datapoints which are near each other, the model naturally moves towards the denser regions of where the data lies in the matrix. Once density within a window of points decreases, the model completes that cluster and moves to repeat this process on other, non covered data points in the set.  
+
+```{r meanshift process}
+library(meanShiftR)
+
+meanshift <- select(train, ScTotPay, ScTotCov, ScTotMed, ScTotDis,
+                     PayMedDiffSc, CovMedDiffSc, CovTotDiffSc, 
+                     ScMedPerc, ScCovPerc, ScMedPerc, ScMedPerDis,
+                     ScTotPerDis, ScCovPerDis, ScDisPerc, ScCovPerc)
+
+
+#meanshift <- meanShift(meanshift, trainData = meanshift, nNeighbors = NROW(meanshift), kernelType = "NORMAL", 
+                       #bandwidth = rep(1, NCOL(trainData)))
+
+
+```
+
+**Summary**
+
+This was an incomplete model due to the inability to get the right syntax to work with the model. First the type of R version that was ran was not supportive of the initial, then there were issues with establishing correct syntax with meanShiftR to make insightful.
+
+
+
+##K-Means Clustering
+
+K-means is perhaps the simplest of the three approaches. Generallly considered the biggest weakness with the KMM approach is that the user must specify how many clusters should be counted from the dataset. This is a particularly large weakness for this dataset since there are so many observations within it. The model calculates points by measuring the mean distance of all points around them. Once it has identified the center value (where the mean is equadistant from all other points in the cluster) within the number of clusters that was specified by the user, the model is completed and the clusters identified. 
+
+```{r KMeans}
+
+#Kmeans
+
+km <- select(train, ScTotPay, ScTotCov, ScTotMed, ScTotDis,
+                           PayMedDiffSc, CovMedDiffSc, CovTotDiffSc, 
+                           ScMedPerc, ScCovPerc, ScMedPerDis,
+                           ScTotPerDis, ScCovPerDis, ScDisPerc)
+
+kmeans <- kmeans(km, 5, nstart = 30)
+
+#Breaking down the number of instances per cluster
+table(kmeans$cluster)
+
+#Medicare and Total Pay scaled
+plot(km[c("ScTotMed", "ScTotPay")], col = kmeans$cluster)
+
+#Payment - Meidcare and Covered Charges - Medicare
+plot(km[c("PayMedDiffSc", "CovMedDiffSc")], col = kmeans$cluster)
+
+#Payment per discharge and Medicare per discharge
+plot(km[c("ScTotPerDis", "ScMedPerDis")], col = kmeans$cluster)
+
+#Running PCA analysis based on KMeans
+kmeansPCA <- prcomp(km)
+summary(kmeansPCA)
+kmeansPCA <- kmeansPCA$x[,1:2]
+plot(kmeansPCA, main = "Healthcare Fraud Clusters identified by K-means", frame = FALSE)
+
+#Kmeans 2
+
+km2 <- select(train, ScTotPay, ScTotCov, ScTotMed, ScTotDis,
+                           PayMedDiffSc, CovMedDiffSc, CovTotDiffSc, 
+                           ScMedPerc, ScCovPerc, ScMedPerDis,
+                           ScTotPerDis, ScCovPerDis, ScDisPerc)
+
+kmeans2 <- kmeans(km2, 3, nstart = 50)
+kmeans2
+
+#Breaking down the number of instances per cluster
+table(kmeans2$cluster)
+
+#Medicare and Total Pay scaled
+plot(km2[c("ScTotMed", "ScTotPay")], col = kmeans2$cluster)
+
+#Payment - Meidcare and Covered Charges - Medicare
+plot(km2[c("PayMedDiffSc", "CovMedDiffSc")], col = kmeans2$cluster)
+
+#Payment per discharge and Medicare per discharge
+plot(km2[c("ScTotPerDis", "ScMedPerDis")], col = kmeans2$cluster)
+
+#Running PCA analysis based on KMeans
+kmeansPCA2 <- prcomp(km2)
+summary(kmeansPCA2)
+kmeansPCA2 <- kmeansPCA2$x[,1:2]
+plot(kmeansPCA2, main = "Healthcare Fraud Clusters identified by K-means", frame = FALSE)
+
+#Kmeans 3
+
+km3 <- select(train, ScTotPay, ScTotCov, ScTotMed, ScTotDis,
+                           PayMedDiffSc, CovMedDiffSc, CovTotDiffSc, 
+                           ScMedPerc, ScCovPerc, ScMedPerDis,
+                           ScTotPerDis, ScCovPerDis, ScDisPerc)
+
+kmeans3 <- kmeans(km3, 7, nstart = 50)
+kmeans3
+
+summary(kmeans3$centers)
+
+#Breaking down the number of instances per cluster
+table(kmeans3$cluster)
+
+#Medicare and Total Pay scaled
+plot(km3[c("ScTotMed", "ScTotPay")], col = kmeans3$cluster)
+
+#Payment - Meidcare and Covered Charges - Medicare
+plot(km3[c("PayMedDiffSc", "CovMedDiffSc")], col = kmeans3$cluster)
+
+#Payment per discharge and Medicare per discharge
+plot(km3[c("ScTotPerDis", "ScMedPerDis")], col = kmeans3$cluster)
+
+#Running PCA analysis based on KMeans
+kmeansPCA3 <- prcomp(km3)
+kmeansPCA3 <- kmeansPCA3$x[,1:2]
+plot(kmeansPCA3, main = "Healthcare Fraud Clusters identified by K-means", frame = FALSE)
+
+cluster.stats(kmeans$cluster, kmeans2$cluster, kmeans3$cluster)
+
+
+```
+
+**Summary**
+
+Kmeans was by the simplest model to run and due to the relatively quick nature of calculating it, is much easier to compare the performance of one model to the next. Correlations of clustering was high between total payments and medicare payments, a correlation that was identified in previous EDA. What is difficult with Kmeans is the subjectivity of choosing the cluster amounts. There is a clear positive relationship to the bss/tss value with the amount of centers chosen, therefore the model could be prone to overfitting. 
+
+*outliers*
+
+Different sections of variables gathered and added to the dataset tended to cluster together, therefore seing the irregular instances within those groupings would cause alarm as to potential fraudulent instances. For example, between the clustered relatinship of total payment and medicare payment could be used to identify transactions that were not within the norm. 
+
+*Insight*
+
+Clusters which were led by medicare per discharge were highly correlated and in the same cluster as payment and covered cost per discharge. Outliers around this cluster of variable. 
+
+##Conclusion
+
+Out of the three models that were run, it seemed that DBSCAN was the most succesful in identifying the right groupings of the dataset. The major disadvantage to DBScan is the computational power that it demands in completing its calculations. This makes it very difficult to compare results of models without haveing parallel or larger processors running the model.  
+
+Meanshift was an incomplete part of this analysis. The syntax could not be corrected in order to provide insightful analysis. 
+
+Kmeans was the most flexible in the ease with which computation could be completed, however the amount of parameters that are chosen by the user tends to make it the least reliable from an unsupervised model perspective. 
